@@ -1,0 +1,230 @@
+-- Migrado desde Oracle (DWH facturacion) con Genie Migrate
+-- Objeto original: DWH_CORE.PKG_ORQUESTACION
+-- =====================================================================
+-- PKG_ORQUESTACION: cadena diaria del DWH (lanzada por DBMS_SCHEDULER)
+--   1. Dimension cliente   2. Trafico del dia   3. Facturacion (dia 3)
+--   4. Marts               5. Estadisticas + aviso por correo
+-- =====================================================================
+-- TODO: manual review required — Oracle packages have no direct Databricks SQL equivalent;
+-- deploy the Lakeflow Job and SQL task files documented below to replace the public
+-- orchestration entry point DWH_CORE.PKG_ORQUESTACION.P_CADENA_DIARIA.
+
+-- NOTE: La recopilacion explicita con DBMS_STATS se elimina; Delta y Predictive Optimization
+-- mantienen las estadisticas, por lo que P_ESTADISTICAS y su bucle no generan una tarea.
+-- MIGRADO A LAKEFLOW JOBS: la secuencia, la bifurcacion del dia 3 y las notificaciones
+-- de exito/error sustituyen la orquestacion PL/SQL y UTL_MAIL.
+-- TODO: manual review required — materialize and deploy the line-commented Databricks Asset
+-- Bundle Job and companion files below to replace Oracle orchestration entry point
+-- DWH_CORE.PKG_ORQUESTACION.P_CADENA_DIARIA; verify the flattened cross-package procedure names.
+-- File: resources/pkg_orquestacion_cadena_diaria.job.yml
+-- resources:
+--   jobs:
+--     pkg_orquestacion_cadena_diaria:
+--       name: dwh_core_pkg_orquestacion_cadena_diaria
+--       max_concurrent_runs: 1
+--       parameters:
+--         - name: p_fecha
+--           default: ""
+--       run_as:
+--         service_principal_name: ${var.run_as_service_principal_name}
+--       email_notifications:
+--         on_success:
+--           - bi-operaciones@empresa.example
+--         on_failure:
+--           - bi-operaciones@empresa.example
+--       tasks:
+--         - task_key: resolve_fecha
+--           notebook_task:
+--             notebook_path: ../src/resolve_fecha.py
+--             base_parameters:
+--               p_fecha: "{{job.parameters.p_fecha}}"
+--           max_retries: 0
+--         - task_key: log_inicio
+--           depends_on:
+--             - task_key: resolve_fecha
+--           run_if: ALL_SUCCESS
+--           sql_task:
+--             warehouse_id: ${var.warehouse_id}
+--             file:
+--               path: ../sql/log_inicio.sql
+--             parameters:
+--               p_fecha: "{{tasks.resolve_fecha.values.p_fecha}}"
+--           max_retries: 0
+--         - task_key: carga_dim_cliente
+--           depends_on:
+--             - task_key: log_inicio
+--           run_if: ALL_SUCCESS
+--           sql_task:
+--             warehouse_id: ${var.warehouse_id}
+--             file:
+--               path: ../sql/carga_dim_cliente.sql
+--           max_retries: 0
+--         - task_key: carga_fact_trafico
+--           depends_on:
+--             - task_key: carga_dim_cliente
+--           run_if: ALL_SUCCESS
+--           sql_task:
+--             warehouse_id: ${var.warehouse_id}
+--             file:
+--               path: ../sql/carga_fact_trafico.sql
+--             parameters:
+--               p_fecha: "{{tasks.resolve_fecha.values.p_fecha}}"
+--           max_retries: 0
+--         - task_key: es_dia_cierre
+--           depends_on:
+--             - task_key: carga_fact_trafico
+--           run_if: ALL_SUCCESS
+--           condition_task:
+--             op: EQUAL_TO
+--             left: "{{tasks.resolve_fecha.values.es_dia_3}}"
+--             right: "true"
+--         - task_key: carga_fact_mensual
+--           depends_on:
+--             - task_key: es_dia_cierre
+--               outcome: "true"
+--           run_if: ALL_SUCCESS
+--           sql_task:
+--             warehouse_id: ${var.warehouse_id}
+--             file:
+--               path: ../sql/carga_fact_mensual.sql
+--             parameters:
+--               p_periodo: "{{tasks.resolve_fecha.values.p_periodo_cerrado}}"
+--           max_retries: 0
+--         - task_key: mart_arpu_segmento
+--           depends_on:
+--             - task_key: carga_fact_mensual
+--           run_if: ALL_SUCCESS
+--           sql_task:
+--             warehouse_id: ${var.warehouse_id}
+--             file:
+--               path: ../sql/mart_arpu_segmento.sql
+--             parameters:
+--               p_periodo: "{{tasks.resolve_fecha.values.p_periodo_cerrado}}"
+--           max_retries: 0
+--         - task_key: mart_riesgo_churn_cierre
+--           depends_on:
+--             - task_key: mart_arpu_segmento
+--           run_if: ALL_SUCCESS
+--           sql_task:
+--             warehouse_id: ${var.warehouse_id}
+--             file:
+--               path: ../sql/mart_riesgo_churn.sql
+--             parameters:
+--               p_fecha: "{{tasks.resolve_fecha.values.p_fecha_siguiente}}"
+--           max_retries: 0
+--         - task_key: mart_riesgo_churn_diario
+--           depends_on:
+--             - task_key: es_dia_cierre
+--               outcome: "false"
+--           run_if: ALL_SUCCESS
+--           sql_task:
+--             warehouse_id: ${var.warehouse_id}
+--             file:
+--               path: ../sql/mart_riesgo_churn.sql
+--             parameters:
+--               p_fecha: "{{tasks.resolve_fecha.values.p_fecha_siguiente}}"
+--           max_retries: 0
+--         - task_key: log_fin_cierre
+--           depends_on:
+--             - task_key: mart_riesgo_churn_cierre
+--           run_if: ALL_SUCCESS
+--           sql_task:
+--             warehouse_id: ${var.warehouse_id}
+--             file:
+--               path: ../sql/log_fin.sql
+--             parameters:
+--               p_fecha: "{{tasks.resolve_fecha.values.p_fecha}}"
+--           max_retries: 0
+--         - task_key: log_fin_diario
+--           depends_on:
+--             - task_key: mart_riesgo_churn_diario
+--           run_if: ALL_SUCCESS
+--           sql_task:
+--             warehouse_id: ${var.warehouse_id}
+--             file:
+--               path: ../sql/log_fin.sql
+--             parameters:
+--               p_fecha: "{{tasks.resolve_fecha.values.p_fecha}}"
+--           max_retries: 0
+--         - task_key: log_error
+--           depends_on:
+--             - task_key: log_inicio
+--             - task_key: carga_dim_cliente
+--             - task_key: carga_fact_trafico
+--             - task_key: carga_fact_mensual
+--             - task_key: mart_arpu_segmento
+--             - task_key: mart_riesgo_churn_cierre
+--             - task_key: mart_riesgo_churn_diario
+--             - task_key: log_fin_cierre
+--             - task_key: log_fin_diario
+--           run_if: AT_LEAST_ONE_FAILED
+--           sql_task:
+--             warehouse_id: ${var.warehouse_id}
+--             file:
+--               path: ../sql/log_error.sql
+--             parameters:
+--               p_fecha: "{{tasks.resolve_fecha.values.p_fecha}}"
+--               p_mensaje: "Lakeflow run {{job.run_id}} failed; inspect task output"
+--           max_retries: 0
+--
+-- File: src/resolve_fecha.py
+-- from datetime import date, datetime, timedelta
+-- raw = dbutils.widgets.get("p_fecha").strip()
+-- effective = datetime.strptime(raw, "%Y-%m-%d").date() if raw else date.today() - timedelta(days=1)
+-- previous_month = effective.replace(day=1) - timedelta(days=1)
+-- dbutils.jobs.taskValues.set(key="p_fecha", value=effective.isoformat())
+-- dbutils.jobs.taskValues.set(key="p_fecha_siguiente", value=(effective + timedelta(days=1)).isoformat())
+-- dbutils.jobs.taskValues.set(key="p_periodo_cerrado", value=previous_month.strftime("%Y%m"))
+-- dbutils.jobs.taskValues.set(key="es_dia_3", value=str(effective.day == 3).lower())
+--
+-- File: sql/log_inicio.sql
+-- INSERT INTO migracion_dwh.dwh_core.log_procesos
+--   (proceso, paso, estado, filas_afectadas, mensaje, fecha_hora)
+-- VALUES ('PKG_ORQUESTACION.P_CADENA_DIARIA', date_format(to_date(:p_fecha), 'yyyyMMdd'),
+--         'INICIO', NULL, NULL, current_timestamp());
+--
+-- File: sql/carga_dim_cliente.sql
+-- CALL migracion_dwh.dwh_core.sp_carga_dim_cliente();
+--
+-- File: sql/carga_fact_trafico.sql
+-- CALL migracion_dwh.dwh_core.sp_carga_fact_trafico(to_date(:p_fecha));
+--
+-- La facturacion del mes anterior se cierra el dia 3
+-- File: sql/carga_fact_mensual.sql
+-- CALL migracion_dwh.dwh_core.pkg_facturacion_p_carga_fact_mensual(:p_periodo);
+--
+-- File: sql/mart_arpu_segmento.sql
+-- CALL migracion_dwh.dwh_mart.sp_mart_arpu_segmento(:p_periodo);
+--
+-- File: sql/mart_riesgo_churn.sql
+-- CALL migracion_dwh.dwh_mart.sp_mart_riesgo_churn(to_date(:p_fecha));
+--
+-- File: sql/log_fin.sql
+-- INSERT INTO migracion_dwh.dwh_core.log_procesos
+--   (proceso, paso, estado, filas_afectadas, mensaje, fecha_hora)
+-- VALUES ('PKG_ORQUESTACION.P_CADENA_DIARIA', date_format(to_date(:p_fecha), 'yyyyMMdd'),
+--         'FIN', NULL, NULL, current_timestamp());
+--
+-- File: sql/log_error.sql
+-- INSERT INTO migracion_dwh.dwh_core.log_procesos
+--   (proceso, paso, estado, filas_afectadas, mensaje, fecha_hora)
+-- VALUES ('PKG_ORQUESTACION.P_CADENA_DIARIA', date_format(to_date(:p_fecha), 'yyyyMMdd'),
+--         'ERROR', NULL, :p_mensaje, current_timestamp());
+--
+-- Caller migration: replace every SQL CALL to DWH_CORE.PKG_ORQUESTACION.P_CADENA_DIARIA
+-- with a Jobs API run or an upstream run_job_task; pass p_fecha as yyyy-MM-dd and wait for
+-- synchronous completion when the caller depended on PL/SQL completion or error propagation.
+-- Privileges: grant the run-as principal USE CATALOG on migracion_dwh, USE SCHEMA and
+-- EXECUTE on the referenced dwh_core/dwh_mart procedures, and INSERT on dwh_core.log_procesos.
+-- Retry review: max_retries is 0 because source idempotency is not established.
+
+-- MIGRADO A LAKEFLOW JOBS: DWH_CORE.JOB_CADENA_DIARIA ejecuta la cadena cada dia a las 04:30
+-- y usa las notificaciones de correo declaradas en pkg_orquestacion_cadena_diaria.
+-- TODO: manual review required — add this schedule to
+-- resources.jobs.pkg_orquestacion_cadena_diaria in the Asset Bundle, set timezone_id to the
+-- Oracle scheduler timezone, and deploy it enabled; job_action was
+-- DWH_CORE.PKG_ORQUESTACION.P_CADENA_DIARIA, start_date was SYSTIMESTAMP, and no end_date existed.
+-- schedule:
+--   quartz_cron_expression: "0 30 4 * * ?"
+--   timezone_id: ${var.timezone_id}
+--   pause_status: UNPAUSED
