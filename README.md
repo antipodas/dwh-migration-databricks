@@ -4,6 +4,23 @@ Demo de **Genie Migrate** (Migration Projects) para migraciones de DWH a Databri
 (el caso directo) y un DWH de facturación en **Oracle PL/SQL** (el caso difícil, con un cursor fila a fila), con datos
 sintéticos, *custom skills* por origen y scripts de reconciliación. La empresa es ficticia y los datos, sintéticos.
 
+> **¿Cómo se corre la demo?** Todo, paso a paso, en **[GUION_DEMO.md](GUION_DEMO.md)**: montaje en el workspace,
+> preparación (skills y proyectos de respaldo), la demo en directo parada a parada explicando qué pasa por debajo en
+> cada paso, plan B y reset.
+
+## En resumen
+
+1. **Requisitos**: activa la preview *Migration Projects Experimental Features* y comprueba Genie Code (abajo).
+2. **Montaje** (~20 min): sube el código al workspace y ejecuta los scripts de `setup/` para crear el catálogo
+   `migracion_dwh` con datos sintéticos y el código convertido ya validado (guion, sección 2).
+3. **Preparación** (~45 min): instala las skills y crea los proyectos de respaldo (ENSAYO sin skill, BACKUP con skill,
+   CURSOR sin y con skill) para no depender de los tiempos de conversión en directo (guion, sección 3).
+4. **Demo en directo** (~20 min), tres paradas (guion, sección 4):
+   - **Teradata**: Migration Project → *Analyze* (lineage, report) → convertir → revisar el diff.
+   - **Skills y paridad**: instalar la skill `migracion-teradata`, reconvertir y reconciliar (10 controles).
+   - **Oracle**: Genie reescribe un cursor fila a fila gracias a la skill `migracion-oracle`; se cronometra frente a la
+     traducción literal (~30 s para 10 clientes frente a ~5 s para 4.550, mismo resultado).
+
 ## Requisitos del workspace (antes de nada)
 
 1. **Activar la preview _Migration Projects Experimental Features_ (Beta).** Un admin del workspace:
